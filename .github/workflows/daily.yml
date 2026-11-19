@@ -1,0 +1,38 @@
+name: Daily job watch
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # 06:00 UTC, which is 07:00 or 08:00 in Berlin
+  workflow_dispatch:       # lets you start it by hand from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Collect jobs
+        id: scrape
+        run: python job_watch.py
+        continue-on-error: true
+
+      - name: Save jobs.csv
+        run: |
+          git config user.name "job-watch"
+          git config user.email "job-watch@users.noreply.github.com"
+          git add jobs.csv
+          git diff --cached --quiet || git commit -m "New jobs $(date -u +%F)"
+          git push
+
+      - name: Mark the run as failed if a source broke
+        if: steps.scrape.outcome == 'failure'
+        run: exit 1
