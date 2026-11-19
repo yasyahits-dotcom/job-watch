@@ -36,13 +36,13 @@ LOCATION = r"berlin|remote"
 
 # Pages to read. For HTML sources, "link_re" picks out links that point to a
 # single job. "location_filtered" means the page already lists only Berlin/remote jobs.
+# "optional" means a failure is only a warning and doesn't mark the run as failed.
 HTML_SOURCES = [
     {
         "name": "Talents4Good",
         "urls": [
             "https://jobs.talents4good.org/jobs",
             "https://jobs.talents4good.org/jobs?page=2",
-            "https://jobs.talents4good.org/jobs?page=3",
         ],
         "link_re": r"jobs\.talents4good\.org/jobs/\d{6,}",
         "skip_re": r"/apply",
@@ -54,6 +54,7 @@ HTML_SOURCES = [
         "link_re": r"getbaito\.com/de/job/",
         "skip_re": None,
         "location_filtered": False,
+        "optional": True,
     },
     {
         "name": "EnglishJobsInGermany",
@@ -75,7 +76,14 @@ ARBEITNOW_PAGES = 5
 
 OUT = Path(__file__).with_name("jobs.csv")
 FIELDS = ["date_found", "source", "title", "company", "details", "url"]
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; personal-job-watch/1.0)"}
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7",
+    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+}
 TIMEOUT = 30
 
 
@@ -96,9 +104,15 @@ def norm(url: str) -> str:
 
 def get(url: str, **kwargs) -> requests.Response:
     last = None
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             r = requests.get(url, headers=HEADERS, timeout=TIMEOUT, **kwargs)
+            if r.status_code == 429:  # rate limited: wait longer, then try again
+                retry_after = r.headers.get("Retry-After", "")
+                wait = int(retry_after) if retry_after.isdigit() else 0
+                last = requests.HTTPError(f"429 Too Many Requests for url: {url}")
+                time.sleep(min(max(wait, 15 * (attempt + 1)), 90))
+                continue
             r.raise_for_status()
             return r
         except requests.RequestException as e:
@@ -232,15 +246,21 @@ def main() -> int:
     today = date.today().isoformat()
     new_rows, problems = [], []
 
-    sources = [(c["name"], c["location_filtered"], lambda c=c: scrape_html(c)) for c in HTML_SOURCES]
-    sources.append(("Arbeitnow", False, scrape_arbeitnow))
+    sources = [
+        (c["name"], c["location_filtered"], c.get("optional", False), lambda c=c: scrape_html(c))
+        for c in HTML_SOURCES
+    ]
+    sources.append(("Arbeitnow", False, False, scrape_arbeitnow))
 
-    for name, loc_filtered, fetch in sources:
+    for name, loc_filtered, optional, fetch in sources:
         try:
             jobs = fetch()
         except Exception as e:
-            print(f"[{name}] FAILED: {e}")
-            problems.append(name)
+            if optional:
+                print(f"[{name}] WARNING (optional source, not counted as a failure): {e}")
+            else:
+                print(f"[{name}] FAILED: {e}")
+                problems.append(name)
             continue
         hits = [j for j in jobs if wanted(j, loc_filtered)]
         fresh = []
@@ -251,7 +271,8 @@ def main() -> int:
         print(f"[{name}] read {len(jobs)}, matched {len(hits)}, new {len(fresh)}")
         if not jobs:
             print(f"[{name}] WARNING: nothing parsed, the page layout may have changed")
-            problems.append(name)
+            if not optional:
+                problems.append(name)
         for j in fresh:
             new_rows.append(
                 {
